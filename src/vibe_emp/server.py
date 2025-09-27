@@ -37,6 +37,9 @@ class GameSession:
 _bot: AsyncTeleBot | None = None
 _llm: OpenAIChatModel | None = None
 _sessions: dict[int, GameSession] = {}
+# Per-chat locks to prevent concurrent handling of replies in the same chat
+_reply_locks: dict[int, asyncio.Lock] = {}
+_reply_locks_guard: asyncio.Lock = asyncio.Lock()
 
 
 async def _ensure_llm() -> OpenAIChatModel:
@@ -99,6 +102,16 @@ async def _advance_game_from_reply(message: Message) -> tuple[str, bool]:
         return text + f"\n\nhttps://zh.wikipedia.org/wiki/{url_name}", True
 
     return text, False
+
+
+async def _get_or_create_reply_lock(chat_id: int) -> asyncio.Lock:
+    # Ensure that the lock object creation is serialized to avoid races
+    async with _reply_locks_guard:
+        lock: asyncio.Lock | None = _reply_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _reply_locks[chat_id] = lock
+        return lock
 
 
 async def create_bot() -> AsyncTeleBot:
@@ -165,56 +178,61 @@ async def create_bot() -> AsyncTeleBot:
         if session.last_bot_message_id is None or message.reply_to_message.message_id != session.last_bot_message_id:
             return
 
-        # send placeholder reply first
-        placeholder = await bot.send_message(chat_id, "…", reply_to_message_id=message.message_id)
-        text, finished = await _advance_game_from_reply(message)
-        # Build aggregated text by interleaving all previous hints with stored guesses, then the new guess and hint
-        aggregated_text_parts: list[str] = []
-        if chat_id in _sessions:
-            session = _sessions[chat_id]
-            previous_hints: list[str] = [note for note, _ in session.rounds]
-            previous_guesses: list[str] = session.user_guess_log
-            for idx, hint_text in enumerate(previous_hints):
-                aggregated_text_parts.append(hint_text)
-                if idx < len(previous_guesses):
-                    aggregated_text_parts.append(previous_guesses[idx])
-        # Format and store the user's display name and guess
-        from_user = message.from_user
-        display_name: str = (
-            (from_user.username if from_user and from_user.username else None)
-            or (
-                (" ".join(filter(None, [from_user.first_name if from_user else None, from_user.last_name if from_user else None])).strip())
-                if from_user else None
+        lock: asyncio.Lock = await _get_or_create_reply_lock(chat_id)
+        async with lock:
+            # send placeholder reply first
+            placeholder = await bot.send_message(chat_id, "…", reply_to_message_id=message.message_id)
+            text, finished = await _advance_game_from_reply(message)
+            # Build aggregated text by interleaving all previous hints with stored guesses, then the new guess and hint
+            aggregated_text_parts: list[str] = []
+            if chat_id in _sessions:
+                session = _sessions[chat_id]
+                previous_hints: list[str] = [note for note, _ in session.rounds]
+                previous_guesses: list[str] = session.user_guess_log
+                for idx, hint_text in enumerate(previous_hints):
+                    aggregated_text_parts.append(hint_text)
+                    if idx < len(previous_guesses):
+                        aggregated_text_parts.append(previous_guesses[idx])
+            # Format and store the user's display name and guess
+            from_user = message.from_user
+            display_name: str = (
+                (from_user.username if from_user and from_user.username else None)
+                or (
+                    (" ".join(filter(None, [from_user.first_name if from_user else None, from_user.last_name if from_user else None])).strip())
+                    if from_user else None
+                )
+                or "user"
             )
-            or "user"
-        )
-        user_guess: str = (message.text or "").strip()
-        formatted_guess: str = f"{display_name}: {user_guess}"
-        if chat_id in _sessions:
-            _sessions[chat_id].user_guess_log.append(formatted_guess)
-        # Append the current round's guess and the newly generated hint
-        aggregated_text_parts.append(formatted_guess)
-        aggregated_text_parts.append(text)
-        aggregated_text: str = "\n\n".join(aggregated_text_parts)
+            user_guess: str = (message.text or "").strip()
+            formatted_guess: str = f"{display_name}: {user_guess}"
+            if chat_id in _sessions:
+                _sessions[chat_id].user_guess_log.append(formatted_guess)
+            # Append the current round's guess and the newly generated hint
+            aggregated_text_parts.append(formatted_guess)
+            aggregated_text_parts.append(text)
+            aggregated_text: str = "\n\n".join(aggregated_text_parts)
 
-        await bot.edit_message_text(aggregated_text, chat_id, placeholder.message_id)
+            await bot.edit_message_text(aggregated_text, chat_id, placeholder.message_id)
 
-        if not finished and chat_id in _sessions:
-            # Delete the previous hint message to keep only the latest aggregated one
-            previous_message_id: int | None = _sessions[chat_id].last_bot_message_id
-            if previous_message_id is not None:
-                try:
-                    await bot.delete_message(chat_id, previous_message_id)
-                except Exception:
-                    pass
+            if not finished and chat_id in _sessions:
+                # Delete the previous hint message to keep only the latest aggregated one
+                previous_message_id: int | None = _sessions[chat_id].last_bot_message_id
+                if previous_message_id is not None:
+                    try:
+                        await bot.delete_message(chat_id, previous_message_id)
+                    except Exception:
+                        pass
 
-            # Update last bot message id and last hint text for the next reply
-            _sessions[chat_id].last_bot_message_id = placeholder.message_id
-            # Keep only the latest single hint here for LLM rounds context
-            _sessions[chat_id].last_hint_text = text
-        else:
-            # Clear any lingering state just in case
-            _sessions.pop(chat_id, None)
+                # Update last bot message id and last hint text for the next reply
+                _sessions[chat_id].last_bot_message_id = placeholder.message_id
+                # Keep only the latest single hint here for LLM rounds context
+                _sessions[chat_id].last_hint_text = text
+            else:
+                # Clear any lingering state just in case
+                _sessions.pop(chat_id, None)
+                # Also cleanup the per-chat lock when the session ends
+                async with _reply_locks_guard:
+                    _reply_locks.pop(chat_id, None)
 
     await bot.set_my_commands([
         BotCommand("guess", "start a game thread"),
