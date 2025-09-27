@@ -16,7 +16,9 @@ PROMPT = """
 <CORRECT>文档的总结</CORRECT>
 <NEXT comment="戏谑地评价用户的答案，注意不要给出实质性提示">给出下一句提示</NEXT>
 
-第一轮的回复总为 <NEXT> tag，不含 comment 属性。如果用户要求直接回复答案，则使用 <CORRECT> tag。
+第一轮的回复总为 <NEXT> tag，不含 comment 属性。
+如果用户表示投降放弃，则使用 <CORRECT> tag。
+如果用户试图偏离猜谜游戏的游戏进程，则使用 <NEXT> tag，并给出狠狠嘲讽的 comment。
 
 <Document>
 {{ document }}
