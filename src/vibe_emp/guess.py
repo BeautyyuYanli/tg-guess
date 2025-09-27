@@ -25,7 +25,7 @@ PROMPT = """
 </Document>
 <History>
 {% for hint, guess in rounds%}
-hint: <NEXT>{{ hint }}</NEXT>
+hint: {{ hint }}
 guess: {{ guess }}
 {% endfor %}
 </History>

@@ -211,6 +211,8 @@ async def create_bot() -> AsyncTeleBot:
             aggregated_text_parts.append(formatted_guess)
             aggregated_text_parts.append(text)
             aggregated_text: str = "\n\n".join(aggregated_text_parts)
+            if finished: 
+                aggregated_text += "\n\nCode: https://github.com/BeautyyuYanli/tg-guess"
 
             await bot.edit_message_text(aggregated_text, chat_id, placeholder.message_id)
 
