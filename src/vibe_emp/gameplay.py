@@ -42,7 +42,7 @@ def read_candidates(output_dir: Path) -> list[tuple[str, int, Path]]:
 
 
 def compute_weight(token_length: int) -> float:
-    base: float = token_length / 2000.0
+    base: float = token_length / 5000.0
     if base < 0.1:
         return base
     if base > 1.0:
